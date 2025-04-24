@@ -1,121 +1,144 @@
-if (!ObjC.available) {
-    console.log('⚠️ ObjC 运行时不可用，脚本退出');
-}
+/* ========== 0. 环境检查 ========== */
+if (!ObjC.available) { console.log('⚠️ ObjC 不可用'); }
 
-// 安全地把 ObjC 对象转成 JS 字符串
-function safeStr(obj) {
+/* ========== 1. 小工具 ========== */
+function S(o) { try { return (!o || o.isNull()) ? '' : o.toString(); } catch (_) { return ''; } }
+function D(dict) {
+    const out = {}; if (!dict || dict.isNull()) return out;
     try {
-        if (!obj || obj.isNull()) return '';
-        return obj.toString();
-    } catch (e) {
-        return '';
-    }
-}
-
-// 安全地把 NSDictionary 转成 JS 对象
-function safeDict(dict) {
-    var out = {};
-    if (!dict || dict.isNull()) return out;
-    try {
-        var keys = dict.allKeys();
-        for (var i = 0; i < keys.count(); i++) {
-            var k = keys.objectAtIndex_(i);
-            var v = dict.objectForKey_(k);
-            var ks = safeStr(k), vs = safeStr(v);
-            if (ks) out[ks] = vs;
+        const ks = dict.allKeys(); for (let i = 0; i < ks.count(); i++) {
+            const k = ks.objectAtIndex_(i), v = dict.objectForKey_(k);
+            const kk = S(k), vv = S(v); if (kk) out[kk] = vv;
         }
-    } catch (e) { /* 忽略 */ }
+    } catch (_) { }
     return out;
 }
 
-// 拦截 NSURLSessionTask resume，打印请求
-Interceptor.attach(ObjC.classes.NSURLSessionTask['- resume'].implementation, {
-    onEnter: function (args) {
+/* ========== 2. 全局映射 & 去重集 ========== */
+let next = 1;
+const t2id = new Map(), b2id = new Map(), skipT = new Set();
+const bodyDone = new Set(), finishDone = new Set();
+
+/* ========== 3. -resume 打印请求（仅 textnow） ========== */
+Interceptor.attach(
+    ObjC.classes.NSURLSessionTask['- resume'].implementation, {
+    onEnter(a) {
         try {
-            var task = new ObjC.Object(args[0]);
-            // originalRequest 有时为 null，试试 currentRequest
-            var req = task.currentRequest() || task.originalRequest();
+            const task = new ObjC.Object(a[0]),
+                req = task.currentRequest() || task.originalRequest();
             if (!req || req.isNull()) return;
 
-            var method = safeStr(req.HTTPMethod()) || 'GET';
-            var url = safeStr(req.URL() && req.URL().absoluteString());
-            console.log('[→ 请求] ' + method + ' ' + url);
-
-            var hdr = safeDict(req.allHTTPHeaderFields());
-            if (Object.keys(hdr).length)
-                console.log('    • 头部:', JSON.stringify(hdr));
-
-            var body = req.HTTPBody();
-            if (body && !body.isNull()) {
-                var bstr = ObjC.classes.NSString.alloc()
-                    .initWithData_encoding_(body, 4);
-                console.log('    • 请求体:', safeStr(bstr));
+            const url = S(req.URL() && req.URL().absoluteString());
+            if (url.indexOf('textnow.me') === -1) {         // ← 只关心 textnow
+                skipT.add(task.handle.toString());
+                return;
             }
-        } catch (e) {
-            console.log('[! 请求日志出错]', e.message || e);
+            /* --- 记录 & 打印 --- */
+            const id = (t2id.get(task.handle.toString()) || (t2id.set(task.handle.toString(), next), next++));
+            console.log(`[${id}] → ${S(req.HTTPMethod()) || 'GET'} ${url}`);
+
+            const hdr = D(req.allHTTPHeaderFields());
+            if (Object.keys(hdr).length) console.log('    • 头部:', JSON.stringify(hdr));
+
+            const body = req.HTTPBody();
+            if (body && !body.isNull()) {
+                const bs = ObjC.classes.NSString.alloc().initWithData_encoding_(body, 4);
+                console.log('    • 请求体:', S(bs));
+            }
+        } catch (e) { console.log('[! 请求打印]', e); }
+    }
+});
+
+/* ========== 4. completion-handler 回调（保留，去重） ========== */
+function hookC(sel) {
+    const C = ObjC.classes.NSURLSession; if (!(sel in C)) return;
+    const seen = new Set();
+    Interceptor.attach(C[sel].implementation, {
+        onEnter(a) { this.b = a[3]; },
+        onLeave(ret) {
+            const blk = this.b; if (!blk || blk.isNull()) return;
+            const key = blk.toString();
+            /* 过滤被 skip 的任务 */
+            const idMap = (obj) => {
+                const k = obj.handle.toString(); if (skipT.has(k)) return null;
+                if (!t2id.has(k)) t2id.set(k, next++);
+                return t2id.get(k);
+            };
+            const id = idMap(new ObjC.Object(ret)); if (id === null) return;
+            b2id.set(key, id);
+
+            const inv = Memory.readPointer(blk.add(Process.pointerSize * 2));
+            if (inv.isNull() || seen.has(inv.toString())) return; seen.add(inv.toString());
+
+            Interceptor.attach(inv, {
+                onEnter(c) {
+                    const id = b2id.get(key); if (id === undefined) return;
+                    try {
+                        const d = c[1], r = c[2], e = c[3];
+                        /* -- finish & header 去重 -- */
+                        if (r && !r.isNull() && !finishDone.has(id)) {
+                            finishDone.add(id);
+                            const R = new ObjC.Object(r);
+                            console.log(`[${id}] ← ${R.statusCode && R.statusCode()} ${S(R.URL && R.URL().absoluteString())}`);
+                            const h = D(R.allHeaderFields && R.allHeaderFields());
+                            if (Object.keys(h).length) console.log('    • 头部:', JSON.stringify(h));
+                        }
+                        /* -- body 去重 -- */
+                        if (d && !d.isNull() && !bodyDone.has(id)) {
+                            bodyDone.add(id);
+                            let s = ObjC.classes.NSString.alloc().initWithData_encoding_(new ObjC.Object(d), 4);
+                            const MAX = 500; if (s && s.length() > MAX) s = s.substr(0, MAX) + ' …(truncated)';
+                            if (s && s.length() > 0) console.log('    • 响应体:', S(s));
+                        }
+                        if (e && !e.isNull()) {
+                            const E = new ObjC.Object(e);
+                            console.log('    • 错误:', S(E.localizedDescription && E.localizedDescription()));
+                        }
+                    } catch (x) { console.log('[! block 回调]', x); }
+                }
+            });
+        }
+    });
+}
+hookC('- dataTaskWithRequest:completionHandler:');
+hookC('- dataTaskWithURL:completionHandler:');
+
+/* ========== 5. delegate-style 回调（轻量，去重） ========== */
+const msgSend = Module.getExportByName(null, 'objc_msgSend');
+const SEL_DATA = ObjC.selector('URLSession:dataTask:didReceiveData:');
+const SEL_FINISH = ObjC.selector('URLSession:task:didCompleteWithError:');
+
+Interceptor.attach(msgSend, {
+    onEnter(a) {
+        const cmd = a[1];
+        if (cmd.equals(SEL_DATA)) {
+            const taskPtr = a[3], dataPtr = a[4];
+            const k = taskPtr.toString(); if (skipT.has(k) || !t2id.has(k)) return;
+            const id = t2id.get(k); if (bodyDone.has(id) || !dataPtr || dataPtr.isNull()) return;
+            bodyDone.add(id);
+            let s = ObjC.classes.NSString.alloc().initWithData_encoding_(new ObjC.Object(dataPtr), 4);
+            const MAX = 500; if (s && s.length() > MAX) s = s.substr(0, MAX) + ' …(truncated)';
+            if (s && s.length() > 0) console.log(`[${id}] ← (chunk)    • 响应体:`, S(s));
+        }
+        else if (cmd.equals(SEL_FINISH)) {
+            const taskPtr = a[3], errPtr = a[4];
+            const k = taskPtr.toString(); if (skipT.has(k) || !t2id.has(k)) return;
+            const id = t2id.get(k); if (finishDone.has(id)) return;
+            finishDone.add(id);
+            try {
+                const task = new ObjC.Object(taskPtr), resp = task.response && task.response();
+                if (resp && !resp.isNull()) {
+                    console.log(`[${id}] ← ${resp.statusCode && resp.statusCode()} ${S(resp.URL && resp.URL().absoluteString())}`);
+                    const h = D(resp.allHeaderFields && resp.allHeaderFields());
+                    if (Object.keys(h).length) console.log('    • 头部:', JSON.stringify(h));
+                }
+                if (errPtr && !errPtr.isNull()) {
+                    const E = new ObjC.Object(errPtr);
+                    console.log('    • 错误:', S(E.localizedDescription && E.localizedDescription()));
+                }
+            } catch (e) { console.log('[! delegate finish]', e); }
         }
     }
 });
 
-// 通用：给指定 selector 的 completionHandler block 打补丁
-function hookCompletion(sel) {
-    var klass = ObjC.classes.NSURLSession;
-    if (!(sel in klass)) return;
-
-    Interceptor.attach(klass[sel].implementation, {
-        onEnter: function (args) {
-            try {
-                var block = args[3];
-                if (!block || block.isNull()) return;
-
-                // block 内部结构：offset 0x10(=2*pointerSize) 是 invoke 指针
-                var invokePtr = Memory.readPointer(block.add(Process.pointerSize * 2));
-                if (invokePtr.isNull()) return;
-
-                Interceptor.attach(invokePtr, {
-                    onEnter: function (cbArgs) {
-                        try {
-                            // cbArgs[1]=NSData *, cbArgs[2]=NSURLResponse *, cbArgs[3]=NSError *
-                            var dataPtr = cbArgs[1];
-                            var responsePtr = cbArgs[2];
-                            var errorPtr = cbArgs[3];
-
-                            if (responsePtr && !responsePtr.isNull()) {
-                                var resp = new ObjC.Object(responsePtr);
-                                var status = resp.statusCode && resp.statusCode();
-                                var url = safeStr(resp.URL && resp.URL().absoluteString);
-                                console.log('[← 响应] ' + (status || '') + ' ' + url);
-
-                                var rh = safeDict(resp.allHeaderFields && resp.allHeaderFields());
-                                if (Object.keys(rh).length)
-                                    console.log('    • 头部:', JSON.stringify(rh));
-                            }
-
-                            if (dataPtr && !dataPtr.isNull()) {
-                                var dataObj = new ObjC.Object(dataPtr);
-                                var bodyStr = ObjC.classes.NSString.alloc()
-                                    .initWithData_encoding_(dataObj, 4);
-                                console.log('    • 响应体:', safeStr(bodyStr));
-                            }
-
-                            if (errorPtr && !errorPtr.isNull()) {
-                                var errObj = new ObjC.Object(errorPtr);
-                                console.log('    • 错误:', safeStr(errObj.localizedDescription && errObj.localizedDescription()));
-                            }
-                        } catch (e) {
-                            console.log('[! 回调日志出错]', e.message || e);
-                        }
-                    }
-                });
-            } catch (e) {
-                console.log('[! Hook 完成回调失败]', sel, e.message || e);
-            }
-        }
-    });
-}
-
-// 针对两种最常用的 API 做 hook
-hookCompletion('- dataTaskWithRequest:completionHandler:');
-hookCompletion('- dataTaskWithURL:completionHandler:');
-
-console.log('✅ HTTP 请求/响应 日志注入完成');
+console.log('✅ 仅 textnow & 去重 完成注入');
