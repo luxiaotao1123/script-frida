@@ -6,6 +6,9 @@ if (!ObjC.available) {
 
 /* ========== 1. 工具函数 ========== */
 const TARGET_DOMAIN = "textnow.me";
+if (TARGET_DOMAIN) {
+    console.log('🛡️  当前拦截域名：' + TARGET_DOMAIN);
+}
 
 /**
  * 检查 URL 是否匹配目标域名
@@ -95,7 +98,7 @@ Interceptor.attach(
                 // 域名过滤
                 if (!isTargetDomain(url)) return;
 
-                console.log(`[${taskId}] → ${method} ${url}`);
+                console.log(`[${taskId}] 🟢 ===>> ${method} ${url}`);
 
                 // 打印请求头
                 const headers = dictToObject(request.allHTTPHeaderFields());
@@ -165,7 +168,7 @@ function hookCompletionHandler(selectorName) {
                             // 域名过滤
                             if (!isTargetDomain(responseUrl)) return;
 
-                            console.log(`[${taskId}] ← ${statusCode} ${responseUrl}`);
+                            console.log(`[${taskId}] 🟦 <<=== ${statusCode} ${responseUrl}`);
 
                             // 打印响应头
                             const responseHeaders = dictToObject(responseObj.allHeaderFields?.());
@@ -219,10 +222,16 @@ Interceptor.attach(msgSend, {
 
             if (!taskId || !dataPointer || dataPointer.isNull()) return;
 
+            const task = new ObjC.Object(taskPointer);
+            const response = task.response?.();
+            const responseUrl = safeToString(response.URL?.()?.absoluteString());
+            // 域名过滤
+            if (!isTargetDomain(responseUrl)) return;
+
             const responseBody = ObjC.classes.NSString.alloc()
                 .initWithData_encoding_(new ObjC.Object(dataPointer), 4);
             if (responseBody?.length() > 0) {
-                console.log(`[${taskId}] ← (chunk)    • 响应体:`, safeToString(responseBody));
+                console.log(`[${taskId}] 🟦 <<=== (chunk)    • 响应体:`, safeToString(responseBody));
             }
         }
 
@@ -244,7 +253,7 @@ Interceptor.attach(msgSend, {
                     // 域名过滤
                     if (!isTargetDomain(responseUrl)) return;
 
-                    console.log(`[${taskId}] ← ${statusCode} ${responseUrl}`);
+                    console.log(`[${taskId}] 🟦 <<=== ${statusCode} ${responseUrl}`);
 
                     const responseHeaders = dictToObject(response.allHeaderFields?.());
                     if (Object.keys(responseHeaders).length) {
