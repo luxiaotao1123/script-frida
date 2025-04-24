@@ -2,6 +2,10 @@
 Interceptor.detachAll();
 // 配置拦截域名，只需修改此变量即可
 const FILTER_DOMAIN = 'textnow.me';
+if (FILTER_DOMAIN) {
+    console.log('🛡️  当前拦截域名：' + FILTER_DOMAIN);
+}
+
 
 if (!ObjC.available) { console.log('⚠️ ObjC 不可用'); }
 
