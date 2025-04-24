@@ -5,6 +5,24 @@ if (!ObjC.available) {
 }
 
 /* ========== 1. 工具函数 ========== */
+const TARGET_DOMAIN = "textnow.me";
+
+/**
+ * 检查 URL 是否匹配目标域名
+ * @param {string} url - 请求的 URL
+ * @returns {boolean} 是否匹配
+ */
+function isTargetDomain(url) {
+    if (!TARGET_DOMAIN) {
+        return true;
+    }
+    try {
+        return url && url.includes(TARGET_DOMAIN);
+    } catch (_) {
+        return false;
+    }
+}
+
 /**
  * 安全转换为字符串（处理空值和异常）
  * @param {any} obj - 输入对象
@@ -73,6 +91,10 @@ Interceptor.attach(
                 // 打印基础信息
                 const method = safeToString(request.HTTPMethod()) || 'GET';
                 const url = safeToString(request.URL()?.absoluteString());
+
+                // 域名过滤
+                if (!isTargetDomain(url)) return;
+
                 console.log(`[${taskId}] → ${method} ${url}`);
 
                 // 打印请求头
@@ -139,6 +161,10 @@ function hookCompletionHandler(selectorName) {
                             const responseObj = new ObjC.Object(response);
                             const statusCode = responseObj.statusCode?.();
                             const responseUrl = safeToString(responseObj.URL?.()?.absoluteString());
+
+                            // 域名过滤
+                            if (!isTargetDomain(responseUrl)) return;
+
                             console.log(`[${taskId}] ← ${statusCode} ${responseUrl}`);
 
                             // 打印响应头
@@ -214,6 +240,10 @@ Interceptor.attach(msgSend, {
                 if (response && !response.isNull()) {
                     const statusCode = response.statusCode?.();
                     const responseUrl = safeToString(response.URL?.()?.absoluteString());
+
+                    // 域名过滤
+                    if (!isTargetDomain(responseUrl)) return;
+
                     console.log(`[${taskId}] ← ${statusCode} ${responseUrl}`);
 
                     const responseHeaders = dictToObject(response.allHeaderFields?.());
