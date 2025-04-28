@@ -1,185 +1,102 @@
-// detect_push_ws_fixed.js
+// http-hook-complete.js
 ; (function () {
     if (!ObjC.available) {
-        console.error("Objective-C Runtime is not available");
+        console.error("❌ ObjC Runtime 不可用");
         return;
     }
+    console.log("🔌 http-hook-complete.js loaded");
 
-    function tryUtf8(ptr, len) {
-        try { return Memory.readUtf8String(ptr, len); }
-        catch (e) { return null; }
+    // —— 工具函数 —— //
+    const TARGET = "textnow.me";
+    function safe(o) { try { if (!o || o.isNull()) return ''; return o.toString(); } catch { return ''; } }
+    function dictToObj(d) {
+        const o = {};
+        if (!d || d.isNull()) return o;
+        try {
+            const ks = d.allKeys();
+            for (let i = 0; i < ks.count(); i++) {
+                const k = ks.objectAtIndex_(i), v = d.objectForKey_(k);
+                o[safe(k)] = safe(v);
+            }
+        } catch { }
+        return o;
     }
 
-    function dump(ptr, len) {
-        var txt = tryUtf8(ptr, len);
-        return (txt && txt.length)
-            ? txt
-            : hexdump(ptr, { length: len, header: false, ansi: false });
+    // —— 1. AFHTTPClient sendTextNowRequest:json: —— //
+    const AFHTTP = ObjC.classes.AFHTTPClient;
+    if (AFHTTP && AFHTTP['- sendTextNowRequest:json:']) {
+        Interceptor.attach(AFHTTP['- sendTextNowRequest:json:'].implementation, {
+            onEnter(args) {
+                try {
+                    const method = new ObjC.Object(args[2]).toString();
+                    const json = new ObjC.Object(args[3]).toString();
+                    console.log(`🟢 AFHTTPClient sendTextNowRequest: method=${method}`);
+                    console.log(`    • JSON  = ${json}`);
+                } catch (e) { }
+            }
+        });
+        console.log("✅ Hooked AFHTTPClient - sendTextNowRequest:json:");
     }
 
-    // ─── 1. WebSocket Hooks ───────────────────────────────────────────────────────
-    try {
-        var WS1 = ObjC.classes.NWURLSessionWebSocketTask;
-        Interceptor.attach(WS1['- receiveMessageWithCompletionHandler:'].implementation, {
-            onEnter: function (args) {
-                this.cb = args[2];
-            },
-            onLeave: function () {
-                console.log("[WS:NSURLSessionWebSocketTask] Received frame");
+    // —— 2. AFHTTPClient textNowAPIRequestWithMethod:path:parameters:headers: —— //
+    if (AFHTTP && AFHTTP['- textNowAPIRequestWithMethod:path:parameters:headers:']) {
+        Interceptor.attach(
+            AFHTTP['- textNowAPIRequestWithMethod:path:parameters:headers:'].implementation, {
+            onEnter(args) {
+                try {
+                    const m = new ObjC.Object(args[2]).toString();
+                    const p = new ObjC.Object(args[3]).toString();
+                    const params = new ObjC.Object(args[4]);
+                    const hdrs = new ObjC.Object(args[5]);
+                    console.log(`🟡 AFHTTPClient APIRequest method=${m} path=${p}`);
+                    console.log(`    • params = ${JSON.stringify(dictToObj(params))}`);
+                    console.log(`    • headers= ${JSON.stringify(dictToObj(hdrs))}`);
+                } catch (e) { }
             }
         });
-        console.log("[*] Hooked NWURLSessionWebSocketTask");
-    } catch (e) { }
+        console.log("✅ Hooked AFHTTPClient - textNowAPIRequestWithMethod:path:parameters:headers:");
+    }
 
-    try {
-        var WS2 = ObjC.classes['Alamofire.WebSocketRequest'];
-        ObjC.enumerateLoadedClasses({
-            onMatch: function (name) {
-                if (name === 'Alamofire.WebSocketRequest') {
-                    var C = ObjC.classes[name];
-                    C.$ownMethods.forEach(function (m) {
-                        if (m.indexOf("receive") !== -1) {
-                            Interceptor.attach(C[m].implementation, {
-                                onEnter: function () {
-                                    console.log("[WS:Alamofire] " + m + " called");
-                                }
-                            });
-                        }
-                    });
-                }
-            },
-            onComplete: function () { }
-        });
-        console.log("[*] Scanned Alamofire.WebSocketRequest methods");
-    } catch (e) { }
-
-    try {
-        var NWWS = ObjC.classes.NWProtocolWebSocket;
-        NWWS.$ownMethods.forEach(function (m) {
-            if (/frame|message/i.test(m)) {
-                Interceptor.attach(NWWS[m].implementation, {
-                    onEnter: function () {
-                        console.log("[WS:NWProtocolWebSocket] " + m);
-                    }
-                });
+    // —— 3. AFHTTPClient enqueueHTTPRequestOperation: —— //
+    if (AFHTTP && AFHTTP['- enqueueHTTPRequestOperation:']) {
+        Interceptor.attach(AFHTTP['- enqueueHTTPRequestOperation:'].implementation, {
+            onEnter(args) {
+                try {
+                    const op = new ObjC.Object(args[2]);
+                    const req = op.request();
+                    const url = safe(req.URL().absoluteString());
+                    if (!url.includes(TARGET)) return;
+                    console.log(`🔵 enqueueHTTPRequestOperation → ${url}`);
+                } catch (e) { }
             }
         });
-        console.log("[*] Scanned NWProtocolWebSocket methods");
-    } catch (e) { }
+        console.log("✅ Hooked AFHTTPClient - enqueueHTTPRequestOperation:");
+    }
 
-    // ─── 2. POSIX / CFNetwork / TLS 兜底 ────────────────────────────────────────────
-    ['read', 'recv', 'recvfrom', 'readv', 'recvmsg'].forEach(function (fn) {
-        var addr = Module.findExportByName(null, fn);
-        if (!addr) return;
-        Interceptor.attach(addr, {
-            onEnter: function (args) {
-                this.fn = fn;
-                this.buf = args[1];
-                this.len = parseInt(args[2]);
-            },
-            onLeave: function (ret) {
-                var l = ret.toInt32();
-                if (l > 0) {
-                    console.log("[TCP:" + this.fn + "][" + l + " bytes]");
-                }
+    // —— 4. AFJSONRequestOperation responseJSON —— //
+    const AFJ = ObjC.classes.AFJSONRequestOperation;
+    if (AFJ && AFJ['- responseJSON']) {
+        Interceptor.attach(AFJ['- responseJSON'].implementation, {
+            onLeave(ret) {
+                try {
+                    const op = this;  // AFJSONRequestOperation*
+                    const req = new ObjC.Object(op.request());
+                    const url = safe(req.URL().absoluteString());
+                    if (!url.includes(TARGET)) return;
+                    const js = new ObjC.Object(ret);
+                    console.log(`🟣 AFJSONRequestOperation responseJSON ← ${url}`);
+                    console.log(`    • JSON = ${js.toString()}`);
+                } catch (e) { }
             }
         });
-    });
+        console.log("✅ Hooked AFJSONRequestOperation - responseJSON");
+    }
 
-    ['CFReadStreamRead', 'CFWriteStreamWrite'].forEach(function (sym) {
-        var ptr = Module.findExportByName('CFNetwork', sym);
-        if (!ptr) return;
-        Interceptor.attach(ptr, {
-            onEnter: function (args) {
-                this.buf = args[1];
-                this.len = args[2].toInt32();
-                this.sym = sym;
-            },
-            onLeave: function (ret) {
-                var l = ret.toInt32();
-                if (l > 0) console.log("[CFNet:" + this.sym + "][" + l + " bytes]");
-            }
-        });
-    });
+    // —— 保留：NSURLSession hooks —— //
+    //（如果你也想捕 NSURLSession，可在此重用之前给你的脚本——略）
 
-    ['SSLRead', 'SSLWrite'].forEach(function (sym) {
-        var ptr = Module.findExportByName('Security', sym);
-        if (!ptr) return;
-        Interceptor.attach(ptr, {
-            onEnter: function (args) {
-                if (sym === 'SSLRead') {
-                    this.bufPtr = args[1];
-                    this.lenPtr = args[2];
-                } else {
-                    this.buf = args[1];
-                    this.len = args[2].toInt32();
-                }
-                this.sym = sym;
-            },
-            onLeave: function () {
-                if (this.sym === 'SSLRead') {
-                    var l = this.lenPtr.readU32();
-                    if (l > 0) console.log("[TLS:SSLRead][" + l + " bytes]");
-                } else {
-                    if (this.len > 0) console.log("[TLS:SSLWrite][" + this.len + " bytes]");
-                }
-            }
-        });
-    });
+    // —— 保留：NSURLConnection hooks —— //
+    //（同上，可自行加 NSURLConnection 逻辑）
 
-    // ─── 3. PushKit Hook ──────────────────────────────────────────────────────────
-    try {
-        var PKDelName = null;
-        ObjC.enumerateLoadedClasses({
-            onMatch: function (name) {
-                var cls = ObjC.classes[name];
-                if (cls && cls.$protocols &&
-                    cls.$protocols.indexOf('PKPushRegistryDelegate') !== -1) {
-                    PKDelName = name;
-                    console.log("[FOUND] PushKit Delegate: " + name);
-                }
-            },
-            onComplete: function () { }
-        });
-        if (PKDelName) {
-            var sel = '- pushRegistry:didReceiveIncomingPushWithPayload:forType:withCompletionHandler:';
-            var impl = ObjC.classes[PKDelName][sel];
-            if (impl) {
-                Interceptor.attach(impl.implementation, {
-                    onEnter: function (args) {
-                        console.log("[PushKit] Incoming push");
-                    }
-                });
-            }
-        }
-    } catch (e) { }
-
-    // ─── 4. UNUserNotificationCenter Hook ────────────────────────────────────────
-    try {
-        var center = ObjC.classes.UNUserNotificationCenter.currentNotificationCenter();
-        var delegate = center.delegate();
-        if (delegate) {
-            var D = ObjC.classes[delegate.$className];
-            var sel = '- userNotificationCenter:didReceiveNotificationResponse:withCompletionHandler:';
-            if (D[sel]) {
-                Interceptor.attach(D[sel].implementation, {
-                    onEnter: function () {
-                        console.log("[UNNotification] didReceiveNotificationResponse");
-                    }
-                });
-            }
-        }
-    } catch (e) { }
-
-    // ─── 5. UIApplicationDelegate Remote Notification ────────────────────────────
-    ObjC.enumerateLoadedClasses({
-        onMatch: function (name) {
-            if (name.indexOf('AppDelegate') !== -1) {
-                console.log("[APPDELEGATE] " + name);
-            }
-        },
-        onComplete: function () { }
-    });
-
-    console.log("✅ detect_push_ws_fixed.js loaded. 发消息时观察哪条前缀最先出现！");
+    console.log("🎯 All AFNetworking hooks installed — watching textnow.me traffic.");
 })();
