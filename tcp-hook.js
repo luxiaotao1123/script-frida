@@ -47,28 +47,5 @@
         console.log('✅ Hooked AFHTTPClient ' + apiSel);
     }
 
-    // 2. 拦截 JSON 解析，打印响应体
-    const AJO = ObjC.classes.AFJSONRequestOperation;
-    const rsel = '- responseJSON';
-    if (AJO && AJO[rsel]) {
-        Interceptor.attach(AJO[rsel].implementation, {
-            onLeave(ret) {
-                try {
-                    // this 是 AFJSONRequestOperation 实例
-                    const op = new ObjC.Object(this);
-                    const req = op.request();
-                    const url = safeStr(req.URL()?.absoluteString);
-                    if (!url.includes('textnow.me')) return;
-                    const id = getId('JSON ' + url);
-                    const json = new ObjC.Object(ret);
-
-                    console.log(`[${id}] 🟦 <<=== responseJSON @ ${url}`);
-                    console.log('    •', json.toString());
-                } catch { }
-            }
-        });
-        console.log('✅ Hooked AFJSONRequestOperation ' + rsel);
-    }
-
     console.log('🎯 combined-http-hook.js loaded');
 })();
